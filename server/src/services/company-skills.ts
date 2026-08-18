@@ -167,6 +167,16 @@ function normalizePortablePath(input: string) {
   return parts.join("/");
 }
 
+function resolveWslPath(inputPath: string): string {
+  // Convert Windows drive paths to WSL mount paths (E:\foo -> /mnt/e/foo)
+  if (/^[A-Za-z]:[\\\/]/.test(inputPath)) {
+    const drive = inputPath[0].toLowerCase();
+    const rest = inputPath.slice(3).replace(/\\/g, "/");
+    return `/mnt/${drive}/${rest}`;
+  }
+  return inputPath;
+}
+
 function normalizePackageFileMap(files: Record<string, string>) {
   const out: Record<string, string> = {};
   for (const [rawPath, content] of Object.entries(files)) {
@@ -631,7 +641,7 @@ export function parseSkillImportSourceInput(rawInput: string): ParsedSkillImport
   }
 
   return {
-    resolvedSource: normalizedSource,
+    resolvedSource: resolveWslPath(normalizedSource),
     requestedSkillSlug,
     originalSkillsShUrl: null,
     warnings,
@@ -902,7 +912,7 @@ export async function discoverProjectWorkspaceSkillDirectories(target: ProjectSk
 }
 
 async function readLocalSkillImports(companyId: string, sourcePath: string): Promise<ImportedSkill[]> {
-  const resolvedPath = path.resolve(sourcePath);
+  const resolvedPath = path.resolve(resolveWslPath(sourcePath));
   const stat = await fs.stat(resolvedPath).catch(() => null);
   if (!stat) {
     throw unprocessable(`Skill source path does not exist: ${sourcePath}`);

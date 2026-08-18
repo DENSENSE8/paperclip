@@ -190,14 +190,14 @@ const hermesLocalAdapter: ServerAdapterModule = {
 
 const adaptersByType = new Map<string, ServerAdapterModule>(
   [
+    openclawGatewayAdapter,
+    hermesLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,
     cursorLocalAdapter,
     geminiLocalAdapter,
-    openclawGatewayAdapter,
-    hermesLocalAdapter,
     processAdapter,
     httpAdapter,
   ].map((a) => [a.type, a]),

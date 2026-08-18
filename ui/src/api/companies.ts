@@ -13,6 +13,21 @@ import { api } from "./client";
 
 export type CompanyStats = Record<string, { agentCount: number; issueCount: number }>;
 
+export type GitHubRepo = {
+  fullName: string;
+  htmlUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  private: boolean;
+  description: string | null;
+};
+
+export type GitHubReposResponse = {
+  repos: GitHubRepo[];
+  connected: string[];
+  tokenConfigured: boolean;
+};
+
 export const companiesApi = {
   list: () => api.get<Company[]>("/companies"),
   get: (companyId: string) => api.get<Company>(`/companies/${companyId}`),
@@ -55,4 +70,26 @@ export const companiesApi = {
     api.post<CompanyPortabilityPreviewResult>("/companies/import/preview", data),
   importBundle: (data: CompanyPortabilityImportRequest) =>
     api.post<CompanyPortabilityImportResult>("/companies/import", data),
+
+  // GitHub repository connections
+  listGitHubRepos: (companyId: string) =>
+    api.get<GitHubReposResponse>(`/companies/${companyId}/github/repos`),
+  connectGitHubRepos: (companyId: string, repos: Array<{ fullName: string; cloneUrl: string; defaultBranch: string }>) =>
+    api.post<{ connected: Array<{ fullName: string; projectId: string; workspaceId: string }> }>(
+      `/companies/${companyId}/github/repos`,
+      { repos },
+    ),
+  disconnectGitHubRepo: (companyId: string, fullName: string) =>
+    api.delete<{ ok: true; disconnected: string }>(
+      `/companies/${companyId}/github/repos/${encodeURIComponent(fullName)}`,
+    ),
+
+  // GitHub OAuth
+  githubOAuthStatus: (companyId: string) =>
+    api.get<{ connected: boolean }>(`/companies/${companyId}/github/oauth/status`),
+  githubOAuthDisconnect: (companyId: string) =>
+    api.delete<{ ok: true }>(`/companies/${companyId}/github/oauth`),
+  // OAuth authorize is a redirect, handled via window.location
+  githubOAuthAuthorizeUrl: (companyId: string) =>
+    `/api/companies/${companyId}/github/oauth/authorize`,
 };

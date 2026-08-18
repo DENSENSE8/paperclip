@@ -697,9 +697,9 @@ export function CompanyImport() {
     enabled: Boolean(selectedCompanyId),
   });
   const ceoAdapterType = useMemo(() => {
-    if (!companyAgents) return "claude_local";
+    if (!companyAgents) return "openclaw_gateway";
     const ceo = companyAgents.find((a) => a.role === "ceo");
-    return ceo?.adapterType ?? "claude_local";
+    return ceo?.adapterType ?? "openclaw_gateway";
   }, [companyAgents]);
 
   const localZipHelpText =
@@ -1042,7 +1042,7 @@ export function CompanyImport() {
   function handleAdapterConfigChange(slug: string, patch: Partial<CreateConfigValues>) {
     setAdapterConfigValues((prev) => ({
       ...prev,
-      [slug]: { ...(prev[slug] ?? { ...defaultCreateValues, adapterType: adapterOverrides[slug] ?? "claude_local" }), ...patch },
+      [slug]: { ...(prev[slug] ?? { ...defaultCreateValues, adapterType: adapterOverrides[slug] ?? "openclaw_gateway" }), ...patch },
     }));
   }
 

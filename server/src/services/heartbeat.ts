@@ -1194,6 +1194,10 @@ export function heartbeatService(db: Db) {
     opts?: { useProjectWorkspace?: boolean | null },
   ): Promise<ResolvedWorkspaceForRun> {
     const issueId = readNonEmptyString(context.issueId);
+
+    // DIRECT PATH block removed — OpenClaw is SoT for workspace resolution.
+    // OpenClaw agents read workspace info from the heartbeat-context API instead.
+
     const contextProjectId = readNonEmptyString(context.projectId);
     const contextProjectWorkspaceId = readNonEmptyString(context.projectWorkspaceId);
     const issueProjectRef = issueId
@@ -1268,50 +1272,25 @@ export function heartbeatService(db: Db) {
           }
         }
         hasConfiguredProjectCwd = true;
-        const projectCwdExists = await fs
-          .stat(projectCwd)
-          .then((stats) => stats.isDirectory())
-          .catch(() => false);
-        if (projectCwdExists) {
-          return {
-            cwd: projectCwd,
-            source: "project_primary" as const,
-            projectId: resolvedProjectId,
-            workspaceId: workspace.id,
-            repoUrl: workspace.repoUrl,
-            repoRef: workspace.repoRef,
-            workspaceHints,
-            warnings: [preferredWorkspaceWarning, managedWorkspaceWarning].filter(
-              (value): value is string => Boolean(value),
-            ),
-          };
-        }
-        if (preferredWorkspace?.id === workspace.id) {
-          preferredWorkspaceWarning =
-            `Selected project workspace path "${projectCwd}" is not available yet.`;
-        }
-        missingProjectCwds.push(projectCwd);
+        // OpenClaw is SoT — skip fs.stat validation, pass cwd directly.
+        // OpenClaw agents handle workspace access and git operations themselves.
+        return {
+          cwd: projectCwd,
+          source: "project_primary" as const,
+          projectId: resolvedProjectId,
+          workspaceId: workspace.id,
+          repoUrl: workspace.repoUrl,
+          repoRef: workspace.repoRef,
+          workspaceHints,
+          warnings: [preferredWorkspaceWarning, managedWorkspaceWarning].filter(
+            (value): value is string => Boolean(value),
+          ),
+        };
       }
 
+      // No workspace had a cwd — use fallback
       const fallbackCwd = resolveDefaultAgentWorkspaceDir(agent.id);
       await fs.mkdir(fallbackCwd, { recursive: true });
-      const warnings: string[] = [];
-      if (preferredWorkspaceWarning) {
-        warnings.push(preferredWorkspaceWarning);
-      }
-      if (missingProjectCwds.length > 0) {
-        const firstMissing = missingProjectCwds[0];
-        const extraMissingCount = Math.max(0, missingProjectCwds.length - 1);
-        warnings.push(
-          extraMissingCount > 0
-            ? `Project workspace path "${firstMissing}" and ${extraMissingCount} other configured path(s) are not available yet. Using fallback workspace "${fallbackCwd}" for this run.`
-            : `Project workspace path "${firstMissing}" is not available yet. Using fallback workspace "${fallbackCwd}" for this run.`,
-        );
-      } else if (!hasConfiguredProjectCwd) {
-        warnings.push(
-          `Project workspace has no local cwd configured. Using fallback workspace "${fallbackCwd}" for this run.`,
-        );
-      }
       return {
         cwd: fallbackCwd,
         source: "project_primary" as const,
@@ -1320,7 +1299,9 @@ export function heartbeatService(db: Db) {
         repoUrl: projectWorkspaceRows[0]?.repoUrl ?? null,
         repoRef: projectWorkspaceRows[0]?.repoRef ?? null,
         workspaceHints,
-        warnings,
+        warnings: !hasConfiguredProjectCwd
+          ? [`Project workspace has no local cwd configured.`]
+          : [],
       };
     }
 
@@ -1342,42 +1323,24 @@ export function heartbeatService(db: Db) {
       };
     }
 
+    // OpenClaw is SoT — skip fs.stat validation on session workspace too.
     const sessionCwd = readNonEmptyString(previousSessionParams?.cwd);
     if (sessionCwd) {
-      const sessionCwdExists = await fs
-        .stat(sessionCwd)
-        .then((stats) => stats.isDirectory())
-        .catch(() => false);
-      if (sessionCwdExists) {
-        return {
-          cwd: sessionCwd,
-          source: "task_session" as const,
-          projectId: resolvedProjectId,
-          workspaceId: readNonEmptyString(previousSessionParams?.workspaceId),
-          repoUrl: readNonEmptyString(previousSessionParams?.repoUrl),
-          repoRef: readNonEmptyString(previousSessionParams?.repoRef),
-          workspaceHints,
-          warnings: [],
-        };
-      }
+      return {
+        cwd: sessionCwd,
+        source: "task_session" as const,
+        projectId: resolvedProjectId,
+        workspaceId: readNonEmptyString(previousSessionParams?.workspaceId),
+        repoUrl: readNonEmptyString(previousSessionParams?.repoUrl),
+        repoRef: readNonEmptyString(previousSessionParams?.repoRef),
+        workspaceHints,
+        warnings: [],
+      };
     }
 
+    // No workspace found anywhere — use agent home as last resort
     const cwd = resolveDefaultAgentWorkspaceDir(agent.id);
     await fs.mkdir(cwd, { recursive: true });
-    const warnings: string[] = [];
-    if (sessionCwd) {
-      warnings.push(
-        `Saved session workspace "${sessionCwd}" is not available. Using fallback workspace "${cwd}" for this run.`,
-      );
-    } else if (resolvedProjectId) {
-      warnings.push(
-        `No project workspace directory is currently available for this issue. Using fallback workspace "${cwd}" for this run.`,
-      );
-    } else {
-      warnings.push(
-        `No project or prior session workspace was available. Using fallback workspace "${cwd}" for this run.`,
-      );
-    }
     return {
       cwd,
       source: "agent_home" as const,
@@ -1386,7 +1349,7 @@ export function heartbeatService(db: Db) {
       repoUrl: null,
       repoRef: null,
       workspaceHints,
-      warnings,
+      warnings: [],
     };
   }
 

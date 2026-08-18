@@ -403,6 +403,17 @@ export function agentRoutes(db: Db) {
     if (adapterType === "cursor" && !asNonEmptyString(next.model)) {
       next.model = DEFAULT_CURSOR_LOCAL_MODEL;
     }
+    if (adapterType === "openclaw_gateway") {
+      const envToken = process.env.OPENCLAW_GATEWAY_TOKEN?.trim();
+      if (envToken) {
+        const headers = (next.headers ?? {}) as Record<string, unknown>;
+        if (!headers["x-openclaw-token"]) {
+          headers["x-openclaw-token"] = envToken;
+          next.headers = headers;
+        }
+      }
+    }
+
     return ensureGatewayDeviceKey(adapterType, next);
   }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ExecutionWorkspace, Project, ProjectWorkspace } from "@paperclipai/shared";
+import { toWslPath, type ExecutionWorkspace, type Project, type ProjectWorkspace } from "@paperclipai/shared";
 import { ArrowLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -98,7 +98,10 @@ function buildWorkspacePatch(initialState: WorkspaceFormState, nextState: Worksp
     key: keyof Pick<WorkspaceFormState, "name" | "cwd" | "repoUrl" | "baseRef" | "branchName" | "providerRef">,
   ) => {
     if (initialState[key] === nextState[key]) return;
-    patch[key] = key === "name" ? (normalizeText(nextState[key]) ?? initialState.name) : normalizeText(nextState[key]);
+    const normalized = normalizeText(nextState[key]);
+    if (key === "name") { patch[key] = normalized ?? initialState.name; }
+    else if (key === "cwd") { patch[key] = normalized ? toWslPath(normalized) : normalized; }
+    else { patch[key] = normalized; }
   };
 
   maybeAssign("name");
@@ -443,7 +446,7 @@ export function ExecutionWorkspaceDetail() {
                     className="w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-sm outline-none"
                     value={form.cwd}
                     onChange={(event) => setForm((current) => current ? { ...current, cwd: event.target.value } : current)}
-                    placeholder="/absolute/path/to/workspace"
+                    placeholder="/mnt/e/Projects/repo or E:\\Projects\\repo"
                   />
                 </Field>
                 <Field label="Provider path / ref">

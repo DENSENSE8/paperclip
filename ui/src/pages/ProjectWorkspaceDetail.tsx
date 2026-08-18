@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { isUuidLike, type ProjectWorkspace } from "@paperclipai/shared";
+import { isUuidLike, toWslPath, type ProjectWorkspace } from "@paperclipai/shared";
 import { ArrowLeft, Check, ExternalLink, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -121,7 +121,7 @@ function buildWorkspacePatch(initialState: WorkspaceFormState, nextState: Worksp
 
   maybeAssign("name", normalizeText);
   maybeAssign("sourceType");
-  maybeAssign("cwd", normalizeText);
+  maybeAssign("cwd", (v) => normalizeText(toWslPath(v)));
   maybeAssign("repoUrl", normalizeText);
   maybeAssign("repoRef", normalizeText);
   maybeAssign("defaultRef", normalizeText);
@@ -439,12 +439,12 @@ export function ProjectWorkspaceDetail() {
               </Field>
 
               <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]">
-                <Field label="Local path">
+                <Field label="Local path" hint="Windows paths (E:\\...) auto-convert to WSL2 (/mnt/e/...)">
                   <input
                     className="w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-sm outline-none"
                     value={form.cwd}
                     onChange={(event) => setForm((current) => current ? { ...current, cwd: event.target.value } : current)}
-                    placeholder="/absolute/path/to/workspace"
+                    placeholder="/mnt/e/Projects/repo or E:\\Projects\\repo"
                   />
                 </Field>
                 <div className="flex items-end">

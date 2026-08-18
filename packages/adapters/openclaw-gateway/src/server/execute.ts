@@ -225,7 +225,14 @@ function resolveAuthToken(config: Record<string, unknown>, headers: Record<strin
   const authHeader =
     headerMapGetIgnoreCase(headers, "x-openclaw-auth") ??
     headerMapGetIgnoreCase(headers, "authorization");
-  return tokenFromAuthHeader(authHeader);
+  const fromAuthHeader = tokenFromAuthHeader(authHeader);
+  if (fromAuthHeader) return fromAuthHeader;
+
+  // Env var fallback - covers agents created without an explicit token
+  const envToken = process.env.OPENCLAW_GATEWAY_TOKEN?.trim();
+  if (envToken) return envToken;
+
+  return null;
 }
 
 function isSensitiveLogKey(key: string): boolean {

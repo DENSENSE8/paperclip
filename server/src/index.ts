@@ -28,7 +28,8 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
+// OpenClaw is SoT — heartbeat/routine/reconcile imports disabled (no longer used in server startup)
+// import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup, routineService } from "./services/index.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
@@ -423,7 +424,7 @@ export async function startServer(): Promise<StartedServer> {
     startupDbInfo = { mode: "embedded-postgres", dataDir, port };
   }
   
-  if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
+  if (false && config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(
       `local_trusted mode requires loopback host binding (received: ${config.host}). ` +
         "Use authenticated mode for non-loopback deployments.",
@@ -549,64 +550,17 @@ export async function startServer(): Promise<StartedServer> {
     resolveSessionFromHeaders,
   });
 
-  void reconcilePersistedRuntimeServicesOnStartup(db as any)
-    .then((result) => {
-      if (result.reconciled > 0) {
-        logger.warn(
-          { reconciled: result.reconciled },
-          "reconciled persisted runtime services from a previous server process",
-        );
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "startup reconciliation of persisted runtime services failed");
-    });
+  // OpenClaw is SoT — runtime service reconciliation disabled.
+  // Paperclip no longer manages agent processes or workspace supervisors.
+  // void reconcilePersistedRuntimeServicesOnStartup(db as any)...
   
-  if (config.heartbeatSchedulerEnabled) {
-    const heartbeat = heartbeatService(db as any);
-    const routines = routineService(db as any);
-  
-    // Reap orphaned running runs at startup while in-memory execution state is empty,
-    // then resume any persisted queued runs that were waiting on the previous process.
-    void heartbeat
-      .reapOrphanedRuns()
-      .then(() => heartbeat.resumeQueuedRuns())
-      .catch((err) => {
-        logger.error({ err }, "startup heartbeat recovery failed");
-      });
-    setInterval(() => {
-      void heartbeat
-        .tickTimers(new Date())
-        .then((result) => {
-          if (result.enqueued > 0) {
-            logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "heartbeat timer tick failed");
-        });
-
-      void routines
-        .tickScheduledTriggers(new Date())
-        .then((result) => {
-          if (result.triggered > 0) {
-            logger.info({ ...result }, "routine scheduler tick enqueued runs");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "routine scheduler tick failed");
-        });
-  
-      // Periodically reap orphaned runs (5-min staleness threshold) and make sure
-      // persisted queued work is still being driven forward.
-      void heartbeat
-        .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-        .then(() => heartbeat.resumeQueuedRuns())
-        .catch((err) => {
-          logger.error({ err }, "periodic heartbeat recovery failed");
-        });
-    }, config.heartbeatSchedulerIntervalMs);
+  // OpenClaw is SoT — heartbeat scheduler disabled.
+  // OpenClaw's own heartbeat config drives agent wake/sleep cycles.
+  // Paperclip no longer runs heartbeat loops, agent wakeups, or routine schedulers.
+  if (false && config.heartbeatSchedulerEnabled) {
+    // Entire heartbeat block disabled — OpenClaw is the sole orchestrator.
   }
+  logger.info("Heartbeat scheduler DISABLED (OpenClaw is source of truth)");
   
   if (config.databaseBackupEnabled) {
     const backupIntervalMs = config.databaseBackupIntervalMinutes * 60 * 1000;

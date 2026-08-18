@@ -3,6 +3,7 @@ import multer from "multer";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
+  toWslPath,
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
   createIssueWorkProductSchema,
@@ -425,6 +426,16 @@ export function issueRoutes(db: Db, storage: StorageService) {
       wakeCommentId ? svc.getComment(wakeCommentId) : null,
     ]);
 
+    // Resolve workspace info so OpenClaw agents know where to work.
+    // Prefer the issue's specific projectWorkspaceId (for multi-repo projects),
+    // then fall back to the project's primary workspace.
+    const projectWorkspaces = issue.projectId
+      ? await projectsSvc.listWorkspaces(issue.projectId)
+      : [];
+    const workspace = issue.projectWorkspaceId
+      ? projectWorkspaces.find((w) => w.id === issue.projectWorkspaceId) ?? projectWorkspaces.find((w) => w.isPrimary) ?? projectWorkspaces[0] ?? null
+      : projectWorkspaces.find((w) => w.isPrimary) ?? projectWorkspaces[0] ?? null;
+
     res.json({
       issue: {
         id: issue.id,
@@ -439,6 +450,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
         updatedAt: issue.updatedAt,
+        executionWorkspaceSettings: issue.executionWorkspaceSettings ?? null,
       },
       ancestors: ancestors.map((ancestor) => ({
         id: ancestor.id,
@@ -469,6 +481,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
         wakeComment && wakeComment.issueId === issue.id
           ? wakeComment
           : null,
+      workspace: workspace
+        ? {
+            cwd: workspace.cwd ? toWslPath(workspace.cwd) : null,
+            repoUrl: workspace.repoUrl ?? null,
+            repoRef: workspace.repoRef ?? null,
+          }
+        : null,
     });
   });
 
@@ -1822,6 +1841,44 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
 
     res.json({ ok: true });
+  });
+
+
+  // PATCH /:issueId/workspace-path - Set direct workspace path on issue
+  router.patch("/:issueId/workspace-path", async (req, res) => {
+    const issueId = req.params.issueId as string;
+    const { path } = req.body as { path: string };
+
+    if (!path || typeof path !== 'string') {
+      res.status(400).json({ error: "path is required" });
+      return;
+    }
+
+    const issue = await db
+      .select({ companyId: issues.companyId, executionWorkspaceSettings: issues.executionWorkspaceSettings })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+
+    assertCompanyAccess(req, issue.companyId);
+
+    // Update executionWorkspaceSettings with workspace path
+    const updatedSettings = {
+      ...(issue.executionWorkspaceSettings as Record<string, unknown> | null),
+      workspacePath: path,
+    };
+
+    await db
+      .update(issues)
+      .set({ executionWorkspaceSettings: updatedSettings })
+      .where(eq(issues.id, issueId));
+
+    res.json({ success: true, workspacePath: path });
   });
 
   return router;

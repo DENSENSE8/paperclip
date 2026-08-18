@@ -276,6 +276,7 @@ export function NewIssueDialog() {
   const { pushToast } = useToast();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [workspacePath, setWorkspacePath] = useState("");
   const [status, setStatus] = useState("todo");
   const [priority, setPriority] = useState("");
   const [assigneeValue, setAssigneeValue] = useState("");
@@ -672,6 +673,7 @@ export function NewIssueDialog() {
         ? { executionWorkspaceId: selectedExecutionWorkspaceId }
         : {}),
       ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
+      ...(workspacePath ? { executionWorkspaceSettings: { ...(executionWorkspaceSettings || {}), workspacePath } } : {}),
     });
   }
 

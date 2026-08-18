@@ -601,3 +601,5 @@ export {
   type SecretsLocalEncryptedConfig,
   type ConfigMeta,
 } from "./config-schema.js";
+
+export { toWslPath } from "./paths.js";

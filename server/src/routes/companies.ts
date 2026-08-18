@@ -1,5 +1,7 @@
 import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
+import { projectWorkspaces } from "@paperclipai/db";
+import { eq, and, sql } from "drizzle-orm";
 import {
   companyPortabilityExportSchema,
   companyPortabilityImportSchema,
@@ -17,9 +19,18 @@ import {
   companyPortabilityService,
   companyService,
   logActivity,
+  projectService,
+  secretService,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import {
+  getGitHubToken,
+  getGitHubTokenForCompany,
+  listGitHubRepos,
+  buildAuthenticatedCloneUrl,
+  type GitHubRepo,
+} from "../services/github.js";
 
 export function companyRoutes(db: Db, storage?: StorageService) {
   const router = Router();
@@ -28,6 +39,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const portability = companyPortabilityService(db, storage);
   const access = accessService(db);
   const budgets = budgetService(db);
+  const projects = projectService(db);
 
   async function assertCanUpdateBranding(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
@@ -338,5 +350,256 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     res.json({ ok: true });
   });
 
+  // ── GitHub Repository Connections ──────────────────────────────────────
+
+  router.get("/:companyId/github/repos", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const token = await getGitHubTokenForCompany(db, companyId);
+    if (!token) {
+      res.json({ repos: [], connected: [], tokenConfigured: false });
+      return;
+    }
+
+    const [repos, connectedRows] = await Promise.all([
+      listGitHubRepos(token),
+      db
+        .select({ metadata: projectWorkspaces.metadata })
+        .from(projectWorkspaces)
+        .where(
+          and(
+            eq(projectWorkspaces.companyId, companyId),
+            sql`${projectWorkspaces.metadata}->>'source' = 'github_company_connection'`,
+          ),
+        ),
+    ]);
+
+    const connected = connectedRows
+      .map((row) => (row.metadata as Record<string, unknown> | null)?.githubFullName as string)
+      .filter(Boolean);
+
+    res.json({ repos, connected, tokenConfigured: true });
+  });
+
+  router.post("/:companyId/github/repos", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+
+    const token = await getGitHubTokenForCompany(db, companyId);
+    if (!token) {
+      res.status(400).json({ error: "GitHub token is not configured" });
+      return;
+    }
+
+    const { repos } = req.body as {
+      repos: Array<{ fullName: string; cloneUrl: string; defaultBranch: string }>;
+    };
+    if (!Array.isArray(repos) || repos.length === 0) {
+      res.status(400).json({ error: "repos array is required" });
+      return;
+    }
+
+    const results: Array<{ fullName: string; projectId: string; workspaceId: string }> = [];
+
+    for (const repo of repos) {
+      // Check if workspace already exists for this repo
+      const existing = await db
+        .select({ id: projectWorkspaces.id })
+        .from(projectWorkspaces)
+        .where(
+          and(
+            eq(projectWorkspaces.companyId, companyId),
+            sql`${projectWorkspaces.metadata}->>'source' = 'github_company_connection'`,
+            sql`${projectWorkspaces.metadata}->>'githubFullName' = ${repo.fullName}`,
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+
+      if (existing) continue;
+
+      // Find or create project
+      const existingProjects = await projects.list(companyId);
+      let project = existingProjects.find(
+        (p) => (p.metadata as Record<string, unknown> | null)?.githubRepo === repo.fullName,
+      );
+      if (!project) {
+        project = await projects.create(companyId, {
+          name: repo.fullName,
+          metadata: { githubRepo: repo.fullName },
+        });
+      }
+
+      // Create workspace
+      const authenticatedUrl = buildAuthenticatedCloneUrl(repo.cloneUrl, token);
+      const workspace = await projects.createWorkspace(project.id, {
+        sourceType: "git_repo",
+        repoUrl: authenticatedUrl,
+        repoRef: repo.defaultBranch,
+        name: repo.fullName,
+        isPrimary: true,
+        metadata: {
+          source: "github_company_connection",
+          githubFullName: repo.fullName,
+        },
+      });
+
+      if (workspace) {
+        results.push({
+          fullName: repo.fullName,
+          projectId: project.id,
+          workspaceId: workspace.id,
+        });
+      }
+    }
+
+    res.json({ connected: results });
+  });
+
+  router.delete("/:companyId/github/repos/:fullName", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const fullName = decodeURIComponent(req.params.fullName as string);
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+
+    // Find the workspace with this github connection
+    const rows = await db
+      .select({
+        id: projectWorkspaces.id,
+        projectId: projectWorkspaces.projectId,
+      })
+      .from(projectWorkspaces)
+      .where(
+        and(
+          eq(projectWorkspaces.companyId, companyId),
+          sql`${projectWorkspaces.metadata}->>'source' = 'github_company_connection'`,
+          sql`${projectWorkspaces.metadata}->>'githubFullName' = ${fullName}`,
+        ),
+      );
+
+    if (rows.length === 0) {
+      res.status(404).json({ error: "GitHub connection not found" });
+      return;
+    }
+
+    for (const row of rows) {
+      await projects.removeWorkspace(row.projectId, row.id);
+    }
+
+    res.json({ ok: true, disconnected: fullName });
+  });
+
+  // ── GitHub OAuth ──────────────────────────────────────────────────────
+
+  const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
+  const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
+
+  // Initiate OAuth flow
+  router.get("/:companyId/github/oauth/authorize", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+
+    if (!GITHUB_CLIENT_ID) {
+      res.status(400).json({ error: "GITHUB_CLIENT_ID not configured" });
+      return;
+    }
+
+    const redirectUri = `${req.protocol}://${req.get("host")}/api/companies/${companyId}/github/oauth/callback`;
+    const state = Buffer.from(JSON.stringify({ companyId, userId: req.actor.userId })).toString("base64");
+
+    const authUrl = new URL("https://github.com/login/oauth/authorize");
+    authUrl.searchParams.set("client_id", GITHUB_CLIENT_ID);
+    authUrl.searchParams.set("redirect_uri", redirectUri);
+    authUrl.searchParams.set("scope", "repo");
+    authUrl.searchParams.set("state", state);
+
+    res.redirect(authUrl.toString());
+  });
+
+  // Handle OAuth callback
+  router.get("/:companyId/github/oauth/callback", async (req, res) => {
+    const { code, state } = req.query;
+
+    if (!code || !state) {
+      res.status(400).send("Missing code or state parameter");
+      return;
+    }
+
+    try {
+      const stateData = JSON.parse(Buffer.from(state as string, "base64").toString());
+      const { companyId, userId } = stateData;
+
+      const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          client_secret: GITHUB_CLIENT_SECRET,
+          code,
+        }),
+      });
+
+      const tokenData = await tokenResponse.json() as { access_token?: string; error?: string };
+
+      if (tokenData.error || !tokenData.access_token) {
+        throw new Error(tokenData.error || "Failed to get access token");
+      }
+
+      const secrets = secretService(db);
+      const existingSecret = await secrets.getByName(companyId, "GITHUB_OAUTH_TOKEN");
+
+      if (existingSecret) {
+        await secrets.rotate(existingSecret.id, { value: tokenData.access_token }, { userId });
+      } else {
+        await secrets.create(
+          companyId,
+          {
+            name: "GITHUB_OAUTH_TOKEN",
+            description: "GitHub OAuth token for repository access",
+            provider: "local_encrypted",
+            value: tokenData.access_token,
+          },
+          { userId },
+        );
+      }
+
+      res.redirect(`/settings?github_connected=true`);
+    } catch (error) {
+      console.error("GitHub OAuth error:", error);
+      res.status(500).send(`OAuth failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  });
+
+  // Disconnect GitHub
+  router.delete("/:companyId/github/oauth", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+
+    const secrets = secretService(db);
+    const secret = await secrets.getByName(companyId, "GITHUB_OAUTH_TOKEN");
+    if (secret) {
+      await secrets.remove(secret.id);
+    }
+
+    res.json({ ok: true });
+  });
+
+  // Check OAuth status
+  router.get("/:companyId/github/oauth/status", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const secrets = secretService(db);
+    const secret = await secrets.getByName(companyId, "GITHUB_OAUTH_TOKEN");
+    res.json({ connected: !!secret });
+  });
+
   return router;
+
 }

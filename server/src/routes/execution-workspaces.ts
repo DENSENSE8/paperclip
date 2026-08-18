@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { issues, projects, projectWorkspaces } from "@paperclipai/db";
-import { updateExecutionWorkspaceSchema } from "@paperclipai/shared";
+import { toWslPath, updateExecutionWorkspaceSchema } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { executionWorkspaceService, logActivity, workspaceOperationService } from "../services/index.js";
 import { mergeExecutionWorkspaceConfig, readExecutionWorkspaceConfig } from "../services/execution-workspaces.js";
@@ -87,7 +87,7 @@ export function executionWorkspaceRoutes(db: Db) {
     }
     assertCompanyAccess(req, existing.companyId);
 
-    const workspaceCwd = existing.cwd;
+    const workspaceCwd = existing.cwd ? toWslPath(existing.cwd) : existing.cwd;
     if (!workspaceCwd) {
       res.status(422).json({ error: "Execution workspace needs a local path before Paperclip can manage local runtime services" });
       return;
@@ -134,7 +134,7 @@ export function executionWorkspaceRoutes(db: Db) {
     const operation = await recorder.recordOperation({
       phase: action === "stop" ? "workspace_teardown" : "workspace_provision",
       command: `workspace runtime ${action}`,
-      cwd: existing.cwd,
+      cwd: existing.cwd ? toWslPath(existing.cwd) : existing.cwd,
       metadata: {
         action,
         executionWorkspaceId: existing.id,
@@ -322,7 +322,7 @@ export function executionWorkspaceRoutes(db: Db) {
         await stopRuntimeServicesForExecutionWorkspace({
           db,
           executionWorkspaceId: existing.id,
-          workspaceCwd: existing.cwd,
+          workspaceCwd: existing.cwd ? toWslPath(existing.cwd) : existing.cwd,
         });
         const projectWorkspace = existing.projectWorkspaceId
           ? await db

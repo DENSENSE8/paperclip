@@ -29,13 +29,6 @@ import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
 
 const SUPPORTED_ADVANCED_ADAPTER_TYPES = new Set<CreateConfigValues["adapterType"]>([
-  "claude_local",
-  "codex_local",
-  "gemini_local",
-  "opencode_local",
-  "pi_local",
-  "cursor",
-  "hermes_local",
   "openclaw_gateway",
 ]);
 
@@ -43,19 +36,7 @@ function createValuesForAdapterType(
   adapterType: CreateConfigValues["adapterType"],
 ): CreateConfigValues {
   const { adapterType: _discard, ...defaults } = defaultCreateValues;
-  const nextValues: CreateConfigValues = { ...defaults, adapterType };
-  if (adapterType === "codex_local") {
-    nextValues.model = DEFAULT_CODEX_LOCAL_MODEL;
-    nextValues.dangerouslyBypassSandbox =
-      DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
-  } else if (adapterType === "gemini_local") {
-    nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
-  } else if (adapterType === "cursor") {
-    nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
-  } else if (adapterType === "opencode_local") {
-    nextValues.model = "";
-  }
-  return nextValues;
+  return { ...defaults, adapterType };
 }
 
 export function NewAgent() {
@@ -286,6 +267,7 @@ export function NewAgent() {
           values={configValues}
           onChange={(patch) => setConfigValues((prev) => ({ ...prev, ...patch }))}
           adapterModels={adapterModels}
+          showAdapterTypeField={false}
         />
 
         <div className="border-t border-border px-4 py-4">

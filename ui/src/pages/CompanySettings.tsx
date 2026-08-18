@@ -1,26 +1,18 @@
-import { ChangeEvent, useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
-import { useToast } from "../context/ToastContext";
-import { companiesApi } from "../api/companies";
-import { accessApi } from "../api/access";
+import { companiesApi, type GitHubRepo } from "../api/companies";
+import { projectsApi } from "../api/projects";
 import { assetsApi } from "../api/assets";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Settings, Check, Download, Upload } from "lucide-react";
+import { Settings, Download, Upload, Github } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import {
   Field,
-  ToggleField,
-  HintIcon
+  ToggleField
 } from "../components/agent-config-primitives";
-
-type AgentSnippetInput = {
-  onboardingTextUrl: string;
-  connectionCandidates?: string[] | null;
-  testResolutionUrl?: string | null;
-};
 
 export function CompanySettings() {
   const {
@@ -30,14 +22,18 @@ export function CompanySettings() {
     setSelectedCompanyId
   } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
-  const { pushToast } = useToast();
   const queryClient = useQueryClient();
+
   // General settings local state
   const [companyName, setCompanyName] = useState("");
   const [description, setDescription] = useState("");
   const [brandColor, setBrandColor] = useState("");
   const [logoUrl, setLogoUrl] = useState("");
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+
+  // Local repo path state
+  const [localRepoPath, setLocalRepoPath] = useState("");
+  const [localRepoName, setLocalRepoName] = useState("");
 
   // Sync local state from selected company
   useEffect(() => {
@@ -47,11 +43,6 @@ export function CompanySettings() {
     setBrandColor(selectedCompany.brandColor ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
   }, [selectedCompany]);
-
-  const [inviteError, setInviteError] = useState<string | null>(null);
-  const [inviteSnippet, setInviteSnippet] = useState<string | null>(null);
-  const [snippetCopied, setSnippetCopied] = useState(false);
-  const [snippetCopyDelightId, setSnippetCopyDelightId] = useState(0);
 
   const generalDirty =
     !!selectedCompany &&
@@ -77,59 +68,6 @@ export function CompanySettings() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
-    }
-  });
-
-  const inviteMutation = useMutation({
-    mutationFn: () =>
-      accessApi.createOpenClawInvitePrompt(selectedCompanyId!),
-    onSuccess: async (invite) => {
-      setInviteError(null);
-      const base = window.location.origin.replace(/\/+$/, "");
-      const onboardingTextLink =
-        invite.onboardingTextUrl ??
-        invite.onboardingTextPath ??
-        `/api/invites/${invite.token}/onboarding.txt`;
-      const absoluteUrl = onboardingTextLink.startsWith("http")
-        ? onboardingTextLink
-        : `${base}${onboardingTextLink}`;
-      setSnippetCopied(false);
-      setSnippetCopyDelightId(0);
-      let snippet: string;
-      try {
-        const manifest = await accessApi.getInviteOnboarding(invite.token);
-        snippet = buildAgentSnippet({
-          onboardingTextUrl: absoluteUrl,
-          connectionCandidates:
-            manifest.onboarding.connectivity?.connectionCandidates ?? null,
-          testResolutionUrl:
-            manifest.onboarding.connectivity?.testResolutionEndpoint?.url ??
-            null
-        });
-      } catch {
-        snippet = buildAgentSnippet({
-          onboardingTextUrl: absoluteUrl,
-          connectionCandidates: null,
-          testResolutionUrl: null
-        });
-      }
-      setInviteSnippet(snippet);
-      try {
-        await navigator.clipboard.writeText(snippet);
-        setSnippetCopied(true);
-        setSnippetCopyDelightId((prev) => prev + 1);
-        setTimeout(() => setSnippetCopied(false), 2000);
-      } catch {
-        /* clipboard may not be available */
-      }
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.sidebarBadges(selectedCompanyId!)
-      });
-    },
-    onError: (err) => {
-      setInviteError(
-        err instanceof Error ? err.message : "Failed to create invite"
-      );
     }
   });
 
@@ -169,13 +107,6 @@ export function CompanySettings() {
     clearLogoMutation.mutate();
   }
 
-  useEffect(() => {
-    setInviteError(null);
-    setInviteSnippet(null);
-    setSnippetCopied(false);
-    setSnippetCopyDelightId(0);
-  }, [selectedCompanyId]);
-
   const archiveMutation = useMutation({
     mutationFn: ({
       companyId,
@@ -196,6 +127,153 @@ export function CompanySettings() {
       });
     }
   });
+
+  // ── GitHub OAuth ───────────────────────────────────────────────────────
+  const oauthStatusQuery = useQuery({
+    queryKey: ["github-oauth-status", selectedCompanyId],
+    queryFn: () => companiesApi.githubOAuthStatus(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    staleTime: 30_000,
+  });
+
+  const oauthDisconnectMutation = useMutation({
+    mutationFn: () => companiesApi.githubOAuthDisconnect(selectedCompanyId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["github-oauth-status", selectedCompanyId] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.githubRepos(selectedCompanyId!) });
+    },
+  });
+
+  // ── GitHub Repos ───────────────────────────────────────────────────────
+  const githubQuery = useQuery({
+    queryKey: queryKeys.companies.githubRepos(selectedCompanyId ?? ""),
+    queryFn: () => companiesApi.listGitHubRepos(selectedCompanyId!),
+    enabled: !!selectedCompanyId && !!oauthStatusQuery.data?.connected,
+    staleTime: 60_000,
+  });
+
+  const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
+  const [githubInitialized, setGithubInitialized] = useState(false);
+
+  useEffect(() => {
+    if (githubQuery.data && !githubInitialized) {
+      setSelectedRepos(new Set(githubQuery.data.connected));
+      setGithubInitialized(true);
+    }
+  }, [githubQuery.data, githubInitialized]);
+
+  // Reset when company changes
+  useEffect(() => {
+    setGithubInitialized(false);
+    setSelectedRepos(new Set());
+  }, [selectedCompanyId]);
+
+  const githubDirty = useMemo(() => {
+    if (!githubQuery.data) return false;
+    const current = new Set(githubQuery.data.connected);
+    if (selectedRepos.size !== current.size) return true;
+    for (const name of selectedRepos) {
+      if (!current.has(name)) return true;
+    }
+    return false;
+  }, [selectedRepos, githubQuery.data]);
+
+  const githubSaveMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCompanyId || !githubQuery.data) return;
+      const current = new Set(githubQuery.data.connected);
+
+      const toConnect = githubQuery.data.repos.filter(
+        (r) => selectedRepos.has(r.fullName) && !current.has(r.fullName),
+      );
+      const toDisconnect = githubQuery.data.connected.filter(
+        (name) => !selectedRepos.has(name),
+      );
+
+      if (toConnect.length > 0) {
+        await companiesApi.connectGitHubRepos(
+          selectedCompanyId,
+          toConnect.map((r) => ({
+            fullName: r.fullName,
+            cloneUrl: r.cloneUrl,
+            defaultBranch: r.defaultBranch,
+          })),
+        );
+      }
+
+      for (const name of toDisconnect) {
+        await companiesApi.disconnectGitHubRepo(selectedCompanyId, name);
+      }
+    },
+    onSuccess: () => {
+      setGithubInitialized(false);
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.companies.githubRepos(selectedCompanyId!),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.projects.list(selectedCompanyId!),
+      });
+    },
+  });
+
+  function toggleRepo(fullName: string) {
+    setSelectedRepos((prev) => {
+      const next = new Set(prev);
+      if (next.has(fullName)) {
+        next.delete(fullName);
+      } else {
+        next.add(fullName);
+      }
+      return next;
+    });
+  }
+
+  // ── Local Repository ───────────────────────────────────────────────────
+  const addLocalRepoMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedCompanyId || !localRepoPath.trim()) {
+        throw new Error("Company ID and repository path are required");
+      }
+
+      // Derive a project name from the path or use the provided name
+      const pathSegments = localRepoPath.replace(/\\/g, "/").split("/").filter(Boolean);
+      const defaultName = pathSegments[pathSegments.length - 1] || "Local Repository";
+      const projectName = localRepoName.trim() || defaultName;
+
+      // Create a new project for this local repo
+      const project = await projectsApi.create(selectedCompanyId, {
+        name: projectName,
+        metadata: { localPath: localRepoPath },
+      });
+
+      // Create a workspace pointing to the local path
+      await projectsApi.createWorkspace(
+        project.id,
+        {
+          sourceType: "local_path",
+          cwd: localRepoPath,
+          name: projectName,
+          isPrimary: true,
+        },
+        selectedCompanyId,
+      );
+
+      return project;
+    },
+    onSuccess: () => {
+      setLocalRepoPath("");
+      setLocalRepoName("");
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.projects.list(selectedCompanyId!),
+      });
+    },
+  });
+
+  function handleAddLocalRepo(e: React.FormEvent) {
+    e.preventDefault();
+    if (!localRepoPath.trim()) return;
+    addLocalRepoMutation.mutate();
+  }
 
   useEffect(() => {
     setBreadcrumbs([
@@ -221,68 +299,80 @@ export function CompanySettings() {
   }
 
   return (
-    <div className="max-w-2xl space-y-6">
-      <div className="flex items-center gap-2">
-        <Settings className="h-5 w-5 text-muted-foreground" />
-        <h1 className="text-lg font-semibold">Company Settings</h1>
+    <div className="max-w-3xl space-y-8 pb-16">
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
+          <Settings className="h-5 w-5 text-foreground" />
+        </div>
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Company Settings</h1>
+          <p className="text-sm text-muted-foreground">Manage your company profile and preferences</p>
+        </div>
       </div>
 
       {/* General */}
-      <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          General
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">General</h2>
+          <p className="text-xs text-muted-foreground">Basic information about your company</p>
         </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+        <div className="space-y-4 rounded-lg border border-border bg-card px-5 py-5 shadow-sm">
           <Field label="Company name" hint="The display name for your company.">
             <input
-              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
               type="text"
               value={companyName}
               onChange={(e) => setCompanyName(e.target.value)}
+              placeholder="Acme Corporation"
             />
           </Field>
           <Field
             label="Description"
             hint="Optional description shown in the company profile."
           >
-            <input
-              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-              type="text"
+            <textarea
+              className="min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-y"
               value={description}
-              placeholder="Optional company description"
+              placeholder="A brief description of your company..."
               onChange={(e) => setDescription(e.target.value)}
             />
           </Field>
         </div>
-      </div>
+      </section>
 
       {/* Appearance */}
-      <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          Appearance
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Appearance</h2>
+          <p className="text-xs text-muted-foreground">Customize your company's visual identity</p>
         </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
-          <div className="flex items-start gap-4">
+        <div className="space-y-4 rounded-lg border border-border bg-card px-5 py-5 shadow-sm">
+          <div className="flex items-start gap-6">
             <div className="shrink-0">
-              <CompanyPatternIcon
-                companyName={companyName || selectedCompany.name}
-                logoUrl={logoUrl || null}
-                brandColor={brandColor || null}
-                className="rounded-[14px]"
-              />
+              <div className="relative group">
+                <CompanyPatternIcon
+                  companyName={companyName || selectedCompany.name}
+                  logoUrl={logoUrl || null}
+                  brandColor={brandColor || null}
+                  className="rounded-2xl transition-transform group-hover:scale-105"
+                />
+                <div className="absolute -bottom-1 -right-1 h-4 w-4 rounded-full border-2 border-background bg-green-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+              </div>
             </div>
-            <div className="flex-1 space-y-3">
+            <div className="flex-1 space-y-4">
               <Field
                 label="Logo"
                 hint="Upload a PNG, JPEG, WEBP, GIF, or SVG logo image."
               >
-                <div className="space-y-2">
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
-                    onChange={handleLogoFileChange}
-                    className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none file:mr-4 file:rounded-md file:border-0 file:bg-muted file:px-2.5 file:py-1 file:text-xs"
-                  />
+                <div className="space-y-2.5">
+                  <div className="relative">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                      onChange={handleLogoFileChange}
+                      className="w-full cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm transition-colors file:mr-4 file:cursor-pointer file:rounded-md file:border-0 file:bg-primary file:text-primary-foreground file:px-3 file:py-1.5 file:text-xs file:font-medium file:transition-colors hover:file:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    />
+                  </div>
                   {logoUrl && (
                     <div className="flex items-center gap-2">
                       <Button
@@ -290,26 +380,34 @@ export function CompanySettings() {
                         variant="outline"
                         onClick={handleClearLogo}
                         disabled={clearLogoMutation.isPending}
+                        className="transition-all hover:border-destructive hover:text-destructive"
                       >
                         {clearLogoMutation.isPending ? "Removing..." : "Remove logo"}
                       </Button>
                     </div>
                   )}
                   {(logoUploadMutation.isError || logoUploadError) && (
-                    <span className="text-xs text-destructive">
-                      {logoUploadError ??
-                        (logoUploadMutation.error instanceof Error
-                          ? logoUploadMutation.error.message
-                          : "Logo upload failed")}
-                    </span>
+                    <div className="flex items-start gap-2 rounded-md bg-destructive/10 p-2.5 text-xs text-destructive">
+                      <span className="font-medium">Error:</span>
+                      <span>
+                        {logoUploadError ??
+                          (logoUploadMutation.error instanceof Error
+                            ? logoUploadMutation.error.message
+                            : "Logo upload failed")}
+                      </span>
+                    </div>
                   )}
                   {clearLogoMutation.isError && (
-                    <span className="text-xs text-destructive">
-                      {clearLogoMutation.error.message}
-                    </span>
+                    <div className="flex items-start gap-2 rounded-md bg-destructive/10 p-2.5 text-xs text-destructive">
+                      <span className="font-medium">Error:</span>
+                      <span>{clearLogoMutation.error.message}</span>
+                    </div>
                   )}
                   {logoUploadMutation.isPending && (
-                    <span className="text-xs text-muted-foreground">Uploading logo...</span>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <div className="h-3 w-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                      <span>Uploading logo...</span>
+                    </div>
                   )}
                 </div>
               </Field>
@@ -317,13 +415,15 @@ export function CompanySettings() {
                 label="Brand color"
                 hint="Sets the hue for the company icon. Leave empty for auto-generated color."
               >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={brandColor || "#6366f1"}
-                    onChange={(e) => setBrandColor(e.target.value)}
-                    className="h-8 w-8 cursor-pointer rounded border border-border bg-transparent p-0"
-                  />
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <input
+                      type="color"
+                      value={brandColor || "#6366f1"}
+                      onChange={(e) => setBrandColor(e.target.value)}
+                      className="h-10 w-10 cursor-pointer rounded-lg border border-input bg-background p-1 transition-all hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    />
+                  </div>
                   <input
                     type="text"
                     value={brandColor}
@@ -334,16 +434,16 @@ export function CompanySettings() {
                       }
                     }}
                     placeholder="Auto"
-                    className="w-28 rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none"
+                    className="w-32 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                   />
                   {brandColor && (
                     <Button
                       size="sm"
                       variant="ghost"
                       onClick={() => setBrandColor("")}
-                      className="text-xs text-muted-foreground"
+                      className="text-xs hover:text-foreground"
                     >
-                      Clear
+                      Reset
                     </Button>
                   )}
                 </div>
@@ -351,37 +451,251 @@ export function CompanySettings() {
             </div>
           </div>
         </div>
-      </div>
+      </section>
 
       {/* Save button for General + Appearance */}
       {generalDirty && (
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            onClick={handleSaveGeneral}
-            disabled={generalMutation.isPending || !companyName.trim()}
-          >
-            {generalMutation.isPending ? "Saving..." : "Save changes"}
-          </Button>
-          {generalMutation.isSuccess && (
-            <span className="text-xs text-muted-foreground">Saved</span>
-          )}
-          {generalMutation.isError && (
-            <span className="text-xs text-destructive">
-              {generalMutation.error instanceof Error
-                  ? generalMutation.error.message
-                  : "Failed to save"}
-            </span>
-          )}
+        <div className="sticky bottom-4 z-10 flex items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-5 py-4 shadow-lg backdrop-blur-sm animate-in slide-in-from-bottom-2">
+          <div className="flex-1">
+            <p className="text-sm font-medium">You have unsaved changes</p>
+            <p className="text-xs text-muted-foreground">Save your changes to update the company profile</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button
+              size="default"
+              onClick={handleSaveGeneral}
+              disabled={generalMutation.isPending || !companyName.trim()}
+              className="min-w-[100px] shadow-sm"
+            >
+              {generalMutation.isPending ? (
+                <>
+                  <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                  Saving...
+                </>
+              ) : (
+                "Save changes"
+              )}
+            </Button>
+            {generalMutation.isSuccess && (
+              <div className="flex items-center gap-1.5 text-sm font-medium text-green-600 animate-in fade-in">
+                <div className="h-1.5 w-1.5 rounded-full bg-green-600" />
+                Saved
+              </div>
+            )}
+            {generalMutation.isError && (
+              <div className="max-w-xs rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {generalMutation.error instanceof Error
+                    ? generalMutation.error.message
+                    : "Failed to save"}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Hiring */}
-      <div className="space-y-4" data-testid="company-settings-team-section">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          Hiring
+      {/* GitHub Repositories */}
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">GitHub Repositories</h2>
+          <p className="text-xs text-muted-foreground">Connect cloud repositories or add local paths</p>
         </div>
-        <div className="rounded-md border border-border px-4 py-3">
+
+        {/* OAuth Connection Status */}
+        <div className="rounded-lg border border-border bg-card px-5 py-4 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
+                <Github className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-medium">GitHub Account</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {oauthStatusQuery.data?.connected
+                    ? "Connected - browse and select repositories below"
+                    : "Connect to access your GitHub repositories"}
+                </p>
+              </div>
+            </div>
+            <div>
+              {oauthStatusQuery.isLoading ? (
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              ) : oauthStatusQuery.data?.connected ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => oauthDisconnectMutation.mutate()}
+                  disabled={oauthDisconnectMutation.isPending}
+                  className="transition-colors hover:border-destructive hover:text-destructive"
+                >
+                  {oauthDisconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
+                </Button>
+              ) : (
+                <Button
+                  size="default"
+                  onClick={() => {
+                    window.location.href = companiesApi.githubOAuthAuthorizeUrl(selectedCompanyId!);
+                  }}
+                  className="shadow-sm"
+                >
+                  <Github className="mr-2 h-4 w-4" />
+                  Connect GitHub
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Cloud Repositories (OAuth) */}
+        {oauthStatusQuery.data?.connected && (
+          <div className="rounded-lg border border-border bg-card px-5 py-5 shadow-sm">
+            <h3 className="text-sm font-medium mb-3">Cloud Repositories</h3>
+            {githubQuery.isLoading ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground py-4">
+                <div className="h-3 w-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                <span>Loading repositories...</span>
+              </div>
+            ) : githubQuery.isError ? (
+              <div className="rounded-md bg-destructive/10 p-3 text-xs text-destructive">
+                Failed to load repositories: {githubQuery.error instanceof Error ? githubQuery.error.message : "Unknown error"}
+              </div>
+            ) : githubQuery.data?.repos.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No repositories found. Ensure your GitHub token has access to repositories.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                <div className="max-h-64 overflow-y-auto rounded-md border border-input">
+                  {githubQuery.data?.repos.map((repo) => (
+                    <label
+                      key={repo.fullName}
+                      className="flex items-start gap-3 p-3 hover:bg-muted/50 cursor-pointer border-b border-border last:border-b-0 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedRepos.has(repo.fullName)}
+                        onChange={() => toggleRepo(repo.fullName)}
+                        className="mt-0.5 h-4 w-4 rounded border-input"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium truncate">{repo.fullName}</span>
+                          {repo.private && (
+                            <span className="shrink-0 text-[10px] bg-muted px-1.5 py-0.5 rounded font-medium">private</span>
+                          )}
+                        </div>
+                        {repo.description && (
+                          <div className="text-xs text-muted-foreground mt-0.5 truncate">{repo.description}</div>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button
+                    size="default"
+                    onClick={() => githubSaveMutation.mutate()}
+                    disabled={!githubDirty || githubSaveMutation.isPending}
+                    className="shadow-sm"
+                  >
+                    {githubSaveMutation.isPending ? (
+                      <>
+                        <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                        Saving...
+                      </>
+                    ) : (
+                      "Save changes"
+                    )}
+                  </Button>
+                  {githubSaveMutation.isSuccess && (
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-green-600 animate-in fade-in">
+                      <div className="h-1.5 w-1.5 rounded-full bg-green-600" />
+                      Saved
+                    </div>
+                  )}
+                  {githubSaveMutation.isError && (
+                    <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {githubSaveMutation.error instanceof Error
+                        ? githubSaveMutation.error.message
+                        : "Failed to save"}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Local Repositories */}
+        <div className="rounded-lg border border-border bg-card px-5 py-5 shadow-sm">
+          <h3 className="text-sm font-medium mb-2">Local Repositories</h3>
+          <p className="text-xs text-muted-foreground mb-4">
+            Add a repository that's already cloned on your local machine or network
+          </p>
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+                  Repository Path
+                </label>
+                <input
+                  type="text"
+                  placeholder="/home/user/repo or E:\Projects\repo"
+                  value={localRepoPath}
+                  onChange={(e) => setLocalRepoPath(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1.5 block">
+                  Display Name (optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="my-project"
+                  value={localRepoName}
+                  onChange={(e) => setLocalRepoName(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                onClick={handleAddLocalRepo}
+                disabled={!localRepoPath.trim() || addLocalRepoMutation.isPending}
+                className="shadow-sm"
+              >
+                {addLocalRepoMutation.isPending ? (
+                  <>
+                    <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                    Adding...
+                  </>
+                ) : (
+                  "Add Repository"
+                )}
+              </Button>
+              {addLocalRepoMutation.isError && (
+                <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {addLocalRepoMutation.error instanceof Error
+                    ? addLocalRepoMutation.error.message
+                    : "Failed to add"}
+                </div>
+              )}
+            </div>
+            <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+              <p className="font-medium mb-1">Note:</p>
+              <p>Local repositories are added as project workspaces. The repository will appear in your Projects list after adding.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Hiring */}
+      <section className="space-y-4" data-testid="company-settings-team-section">
+        <div>
+          <h2 className="text-sm font-semibold">Hiring</h2>
+          <p className="text-xs text-muted-foreground">Configure team member onboarding policies</p>
+        </div>
+        <div className="rounded-lg border border-border bg-card px-5 py-4 shadow-sm">
           <ToggleField
             label="Require board approval for new hires"
             hint="New agent hires stay pending until approved by board."
@@ -390,279 +704,102 @@ export function CompanySettings() {
             toggleTestId="company-settings-team-approval-toggle"
           />
         </div>
-      </div>
-
-      {/* Invites */}
-      <div className="space-y-4" data-testid="company-settings-invites-section">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          Invites
-        </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">
-              Generate an OpenClaw agent invite snippet.
-            </span>
-            <HintIcon text="Creates a short-lived OpenClaw agent invite and renders a copy-ready prompt." />
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              data-testid="company-settings-invites-generate-button"
-              size="sm"
-              onClick={() => inviteMutation.mutate()}
-              disabled={inviteMutation.isPending}
-            >
-              {inviteMutation.isPending
-                ? "Generating..."
-                : "Generate OpenClaw Invite Prompt"}
-            </Button>
-          </div>
-          {inviteError && (
-            <p className="text-sm text-destructive">{inviteError}</p>
-          )}
-          {inviteSnippet && (
-            <div
-              className="rounded-md border border-border bg-muted/30 p-2"
-              data-testid="company-settings-invites-snippet"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs text-muted-foreground">
-                  OpenClaw Invite Prompt
-                </div>
-                {snippetCopied && (
-                  <span
-                    key={snippetCopyDelightId}
-                    className="flex items-center gap-1 text-xs text-green-600 animate-pulse"
-                  >
-                    <Check className="h-3 w-3" />
-                    Copied
-                  </span>
-                )}
-              </div>
-              <div className="mt-1 space-y-1.5">
-                <textarea
-                  data-testid="company-settings-invites-snippet-textarea"
-                  className="h-[28rem] w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs outline-none"
-                  value={inviteSnippet}
-                  readOnly
-                />
-                <div className="flex justify-end">
-                  <Button
-                    data-testid="company-settings-invites-copy-button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(inviteSnippet);
-                        setSnippetCopied(true);
-                        setSnippetCopyDelightId((prev) => prev + 1);
-                        setTimeout(() => setSnippetCopied(false), 2000);
-                      } catch {
-                        /* clipboard may not be available */
-                      }
-                    }}
-                  >
-                    {snippetCopied ? "Copied snippet" : "Copy snippet"}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+      </section>
 
       {/* Import / Export */}
-      <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          Company Packages
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Company Packages</h2>
+          <p className="text-xs text-muted-foreground">Import and export company data and configurations</p>
         </div>
-        <div className="rounded-md border border-border px-4 py-4">
-          <p className="text-sm text-muted-foreground">
-            Import and export have moved to dedicated pages accessible from the{" "}
-            <a href="/org" className="underline hover:text-foreground">Org Chart</a> header.
+        <div className="rounded-lg border border-border bg-card px-5 py-5 shadow-sm">
+          <p className="text-sm text-muted-foreground mb-4">
+            Manage your company data through dedicated import and export pages. These tools are also accessible from the{" "}
+            <a href="/org" className="font-medium underline underline-offset-4 hover:text-foreground transition-colors">Org Chart</a> header.
           </p>
-          <div className="mt-3 flex items-center gap-2">
-            <Button size="sm" variant="outline" asChild>
+          <div className="flex items-center gap-3">
+            <Button size="default" variant="outline" asChild className="shadow-sm">
               <a href="/company/export">
-                <Download className="mr-1.5 h-3.5 w-3.5" />
-                Export
+                <Download className="mr-2 h-4 w-4" />
+                Export Data
               </a>
             </Button>
-            <Button size="sm" variant="outline" asChild>
+            <Button size="default" variant="outline" asChild className="shadow-sm">
               <a href="/company/import">
-                <Upload className="mr-1.5 h-3.5 w-3.5" />
-                Import
+                <Upload className="mr-2 h-4 w-4" />
+                Import Data
               </a>
             </Button>
           </div>
         </div>
-      </div>
+      </section>
 
       {/* Danger Zone */}
-      <div className="space-y-4">
-        <div className="text-xs font-medium text-destructive uppercase tracking-wide">
-          Danger Zone
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold text-destructive">Danger Zone</h2>
+          <p className="text-xs text-muted-foreground">Irreversible and destructive actions</p>
         </div>
-        <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 px-4 py-4">
-          <p className="text-sm text-muted-foreground">
-            Archive this company to hide it from the sidebar. This persists in
-            the database.
-          </p>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="destructive"
-              disabled={
-                archiveMutation.isPending ||
-                selectedCompany.status === "archived"
-              }
-              onClick={() => {
-                if (!selectedCompanyId) return;
-                const confirmed = window.confirm(
-                  `Archive company "${selectedCompany.name}"? It will be hidden from the sidebar.`
-                );
-                if (!confirmed) return;
-                const nextCompanyId =
-                  companies.find(
-                    (company) =>
-                      company.id !== selectedCompanyId &&
-                      company.status !== "archived"
-                  )?.id ?? null;
-                archiveMutation.mutate({
-                  companyId: selectedCompanyId,
-                  nextCompanyId
-                });
-              }}
-            >
-              {archiveMutation.isPending
-                ? "Archiving..."
-                : selectedCompany.status === "archived"
-                ? "Already archived"
-                : "Archive company"}
-            </Button>
-            {archiveMutation.isError && (
-              <span className="text-xs text-destructive">
-                {archiveMutation.error instanceof Error
-                  ? archiveMutation.error.message
-                  : "Failed to archive company"}
-              </span>
-            )}
+        <div className="space-y-4 rounded-lg border-2 border-destructive/30 bg-destructive/5 px-5 py-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-destructive/20">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-destructive">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="text-sm font-medium">Archive Company</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Archive this company to hide it from the sidebar. The company data will persist in
+                the database but will no longer be accessible from the main navigation.
+              </p>
+              <div className="mt-4 flex items-center gap-3">
+                <Button
+                  size="default"
+                  variant="destructive"
+                  disabled={
+                    archiveMutation.isPending ||
+                    selectedCompany.status === "archived"
+                  }
+                  onClick={() => {
+                    if (!selectedCompanyId) return;
+                    const confirmed = window.confirm(
+                      `\u26a0\ufe0f Archive company "${selectedCompany.name}"?\n\nThis will hide the company from the sidebar. You can restore it later from archived companies.`
+                    );
+                    if (!confirmed) return;
+                    const nextCompanyId =
+                      companies.find(
+                        (company) =>
+                          company.id !== selectedCompanyId &&
+                          company.status !== "archived"
+                      )?.id ?? null;
+                    archiveMutation.mutate({
+                      companyId: selectedCompanyId,
+                      nextCompanyId
+                    });
+                  }}
+                  className="shadow-sm"
+                >
+                  {archiveMutation.isPending
+                    ? "Archiving..."
+                    : selectedCompany.status === "archived"
+                    ? "Already archived"
+                    : "Archive company"}
+                </Button>
+                {archiveMutation.isError && (
+                  <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    {archiveMutation.error instanceof Error
+                      ? archiveMutation.error.message
+                      : "Failed to archive company"}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
   );
-}
-
-function buildAgentSnippet(input: AgentSnippetInput) {
-  const candidateUrls = buildCandidateOnboardingUrls(input);
-  const resolutionTestUrl = buildResolutionTestUrl(input);
-
-  const candidateList =
-    candidateUrls.length > 0
-      ? candidateUrls.map((u) => `- ${u}`).join("\n")
-      : "- (No candidate URLs available yet.)";
-
-  const connectivityBlock =
-    candidateUrls.length === 0
-      ? `No candidate URLs are available. Ask your user to configure a reachable hostname in Paperclip, then retry.
-Suggested steps:
-- choose a hostname that resolves to the Paperclip host from your runtime
-- run: pnpm paperclipai allowed-hostname <host>
-- restart Paperclip
-- verify with: curl -fsS http://<host>:3100/api/health
-- regenerate this invite snippet`
-      : `If none are reachable, ask your user to add a reachable hostname in Paperclip, restart, and retry.
-Suggested command:
-- pnpm paperclipai allowed-hostname <host>
-Then verify with: curl -fsS <base-url>/api/health`;
-
-  const resolutionLine = resolutionTestUrl
-    ? `\nYou MUST test Paperclip-to-gateway reachability, call: ${resolutionTestUrl}?url=<urlencoded-gateway-url> (using the hostname that worked above). Do not assume your 172.x is necessarily reachable from Paperclip. Test it. `
-    : "";
-
-  return `You're invited to join a Paperclip organization.
-
-The URLs you should try are:
-${candidateList}
-
-Connectivity guidance:
-If you are running on a different machine than Paperclip, Paperclip must be reachable at one of the hostnames used above.
-Verify the hostname works from your runtime with: GET <base-url>/api/health
-
-${connectivityBlock}
-
-For your "agentName", just use your own agent name (OpenClaw or whatever your name is) and send it directly.
-You also need to send a gateway URL that Paperclip can access. Check your config and include that URL.${resolutionLine}
-
----
-
-This onboarding flow is for OpenClaw Gateway.
-When you submit the join request, use:
-- \`adapterType: "openclaw_gateway"\`
-- \`agentDefaultsPayload.url\` as your \`ws://\` or \`wss://\` gateway URL
-- \`agentDefaultsPayload.headers["x-openclaw-token"]\` with your gateway token
-- (legacy accepted) \`agentDefaultsPayload.headers["x-openclaw-auth"]\`
-- Keep device auth enabled (recommended). If \`devicePrivateKeyPem\` is omitted, Paperclip will generate and persist one during join so pairing approvals remain stable.
-- Only use \`disableDeviceAuth=true\` for special environments where pairing cannot be completed.
-
-Do NOT use \`/v1/responses\` or \`/hooks/*\` in this join flow.
-
-Before you do anything, please respond to your user that you understand the instructions and you're going to work on them. Then do the step above in another session called "paperclip-onboarding" and then tell your user when you're done. Update your user in intermediate steps along the way so they know what's going on.
-
-Then after you've connected to Paperclip (exchanged keys etc.) you MUST review and follow the onboarding instructions in onboarding.txt they give you.
-
-`;
-}
-
-function buildCandidateOnboardingUrls(input: AgentSnippetInput): string[] {
-  const candidates = (input.connectionCandidates ?? [])
-    .map((candidate) => candidate.trim())
-    .filter(Boolean);
-  const urls = new Set<string>();
-  let onboardingUrl: URL | null = null;
-
-  try {
-    onboardingUrl = new URL(input.onboardingTextUrl);
-    urls.add(onboardingUrl.toString());
-  } catch {
-    const trimmed = input.onboardingTextUrl.trim();
-    if (trimmed) {
-      urls.add(trimmed);
-    }
-  }
-
-  if (!onboardingUrl) {
-    for (const candidate of candidates) {
-      urls.add(candidate);
-    }
-    return Array.from(urls);
-  }
-
-  const onboardingPath = `${onboardingUrl.pathname}${onboardingUrl.search}`;
-  for (const candidate of candidates) {
-    try {
-      const base = new URL(candidate);
-      urls.add(`${base.origin}${onboardingPath}`);
-    } catch {
-      urls.add(candidate);
-    }
-  }
-
-  return Array.from(urls);
-}
-
-function buildResolutionTestUrl(input: AgentSnippetInput): string | null {
-  const explicit = input.testResolutionUrl?.trim();
-  if (explicit) return explicit;
-
-  try {
-    const onboardingUrl = new URL(input.onboardingTextUrl);
-    const testPath = onboardingUrl.pathname.replace(
-      /\/onboarding\.txt$/,
-      "/test-resolution"
-    );
-    return `${onboardingUrl.origin}${testPath}`;
-  } catch {
-    return null;
-  }
 }

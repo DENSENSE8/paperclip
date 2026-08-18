@@ -1024,14 +1024,15 @@ function AdapterEnvironmentResult({ result }: { result: AdapterEnvironmentTestRe
 
 /* ---- Internal sub-components ---- */
 
-const ENABLED_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "gemini_local", "opencode_local", "pi_local", "cursor", "hermes_local"]);
+const ENABLED_ADAPTER_TYPES = new Set(["openclaw_gateway"]);
 
 /** Display list includes all real adapter types plus UI-only coming-soon entries. */
-const ADAPTER_DISPLAY_LIST: { value: string; label: string; comingSoon: boolean }[] = [
+const ADAPTER_DISPLAY_LIST: { value: string; label: string; comingSoon: boolean; recommended?: boolean }[] = [
   ...AGENT_ADAPTER_TYPES.map((t) => ({
     value: t,
     label: adapterLabels[t] ?? t,
     comingSoon: !ENABLED_ADAPTER_TYPES.has(t),
+    recommended: t === "openclaw_gateway",
   })),
 ];
 
@@ -1075,6 +1076,9 @@ function AdapterTypeDropdown({
             </span>
             {item.comingSoon && (
               <span className="text-[10px] text-muted-foreground">Coming soon</span>
+            )}
+            {item.recommended && !item.comingSoon && (
+              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">Recommended</span>
             )}
           </button>
         ))}
